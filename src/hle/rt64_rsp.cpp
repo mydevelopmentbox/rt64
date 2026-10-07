@@ -4,7 +4,9 @@
 
 #include "rt64_rsp.h"
 
+#include <algorithm>
 #include <cassert>
+#include <cstdio>
 
 #include "../include/rt64_extended_gbi.h"
 #include "common/rt64_common.h"
@@ -129,6 +131,12 @@ namespace RT64 {
     void RSP::setSegment(uint32_t seg, uint32_t address) {
         assert(seg < RSP_MAX_SEGMENTS);
         segments[seg] = address;
+        static int seg_log = 0;
+        if (seg_log < 24) {
+            seg_log++;
+            std::fprintf(stderr, "seg %u %08X\n", seg, address);
+            std::fflush(stderr);
+        }
     }
 
     void RSP::matrixCommon(const hlslpp::float4x4 &floatMatrix, uint32_t address, uint8_t params) {
@@ -191,6 +199,36 @@ namespace RT64 {
         const uint32_t rdramAddress = fromSegmentedMasked(address);
         const FixedMatrix *fixedMatrix = reinterpret_cast<FixedMatrix *>(state->fromRDRAM(rdramAddress));
         const hlslpp::float4x4 floatMatrix = fixedMatrix->toMatrix4x4();
+        static int mtx_log = 0;
+        if ((params & 0x01) != 0 && mtx_log < 1) {
+            mtx_log++;
+            std::fprintf(stderr, "proj %08X\n", address);
+            for (uint32_t row = 0; row < 4; row++) {
+                std::fprintf(stderr, "  %f %f %f %f\n",
+                    fixedMatrix->toFloat(row, 0), fixedMatrix->toFloat(row, 1),
+                    fixedMatrix->toFloat(row, 2), fixedMatrix->toFloat(row, 3));
+            }
+            std::fflush(stderr);
+        }
+        static uint32_t seen_addr[40] = {};
+        static int seen_n = 0;
+        if ((address >> 24) == 0 && seen_n < 40) {
+            bool seen = false;
+            for (int i = 0; i < seen_n; i++) {
+                if (seen_addr[i] == address) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen) {
+                seen_addr[seen_n++] = address;
+                std::fprintf(stderr, "model mtx %08X phys %08X params %02X t %f %f %f %f\n",
+                    address, rdramAddress, params,
+                    fixedMatrix->toFloat(3, 0), fixedMatrix->toFloat(3, 1),
+                    fixedMatrix->toFloat(3, 2), fixedMatrix->toFloat(3, 3));
+                std::fflush(stderr);
+            }
+        }
         matrixCommon(floatMatrix, address, params);
     }
 
@@ -308,6 +346,15 @@ namespace RT64 {
 
         const uint32_t rdramAddress = fromSegmentedMasked(address);
         const FixedMatrix *fixedMatrix = reinterpret_cast<FixedMatrix *>(state->fromRDRAM(rdramAddress));
+        static int force_log = 0;
+        if (force_log < 12) {
+            force_log++;
+            std::fprintf(stderr, "force mtx %08X phys %08X t %f %f %f %f\n",
+                address, rdramAddress,
+                fixedMatrix->toFloat(3, 0), fixedMatrix->toFloat(3, 1),
+                fixedMatrix->toFloat(3, 2), fixedMatrix->toFloat(3, 3));
+            std::fflush(stderr);
+        }
         modelViewProjMatrix = fixedMatrix->toMatrix4x4();
         modelViewProjInserted = true;
         modelViewProjChanged = false;
@@ -560,6 +607,20 @@ namespace RT64 {
         const GBI *curGBI = state->ext.interpreter->hleGBI;
         uint32_t &geometryMode = geometryModeStack[geometryModeStackSize - 1];
         const bool usesLighting = (geometryMode & G_LIGHTING);
+        {
+            static int litBatches = 0;
+            static int unlitBatches = 0;
+            if (usesLighting) {
+                litBatches++;
+            }
+            else {
+                unlitBatches++;
+            }
+            if ((litBatches + unlitBatches) == 200 || (litBatches + unlitBatches) == 800) {
+                std::fprintf(stderr, "light batches lit %d unlit %d\n", litBatches, unlitBatches);
+                std::fflush(stderr);
+            }
+        }
         const bool usesPointLighting = curGBI->flags.pointLighting && (geometryMode & G_POINT_LIGHTING);
         if (usesLighting) {
             if (lightsChanged) {
@@ -713,6 +774,55 @@ namespace RT64 {
             posTransformed.emplace_back(tfPos);
             posScreen.emplace_back((tfPos.xyz / hlslpp::float3(tfPos.w, -tfPos.w, tfPos.w)) * viewport.scale + viewport.translate);
             floatIndex += 3;
+        }
+        static int batches = 0;
+        if (!posScreen.empty()) {
+            batches++;
+            if (batches <= 1500) {
+                const int count = int(dstMax - dstIndex);
+                const int base = int(posScreen.size()) - count;
+                float minx = 1.0e9f, maxx = -1.0e9f, miny = 1.0e9f, maxy = -1.0e9f;
+                float minw = 1.0e9f, maxw = -1.0e9f;
+                int inside = 0;
+                int front = 0;
+                for (int v = 0; v < count; v++) {
+                    const float x = float(posScreen[base + v].x);
+                    const float y = float(posScreen[base + v].y);
+                    const float w = float(posTransformed[base + v].w);
+                    minx = std::min(minx, x);
+                    maxx = std::max(maxx, x);
+                    miny = std::min(miny, y);
+                    maxy = std::max(maxy, y);
+                    minw = std::min(minw, w);
+                    maxw = std::max(maxw, w);
+                    if (w > 0.0f) {
+                        front++;
+                    }
+                    if (x >= 0.0f && x <= 320.0f && y >= 0.0f && y <= 240.0f) {
+                        inside++;
+                    }
+                }
+                const float bw = maxx - minx;
+                const float bh = maxy - miny;
+                static int shown = 0;
+                static float nearest = 1.0e9f;
+                if (minw < nearest) {
+                    nearest = minw;
+                }
+                const bool compact = shown < 12 && inside >= 4 && bw >= 12.0f && bw <= 90.0f && bh >= 40.0f && bh <= 160.0f;
+                const bool close = shown < 20 && front > 0 && minw < 3500.0f && minw > 1.0f;
+                if (compact || close) {
+                    shown++;
+                    const auto &c0 = vertices[dstIndex].color;
+                    std::fprintf(stderr, "actor b%d n %d in %d w %.0f box %.0f,%.0f %.0fx%.0f lit %u geom %08X col %02X%02X%02X%02X\n",
+                        batches, count, inside, minw, minx, miny, bw, bh, curLightCount, geometryMode, c0.r, c0.g, c0.b, c0.a);
+                    std::fflush(stderr);
+                }
+                if (batches == 1500) {
+                    std::fprintf(stderr, "nearest w %.0f\n", nearest);
+                    std::fflush(stderr);
+                }
+            }
         }
 
         if (usesTextureGen) {
@@ -1102,6 +1212,7 @@ namespace RT64 {
         auto &worldIndices = workload.drawData.worldIndices;
         auto &posScreen = workload.drawData.posScreen;
         auto &tcFloats = workload.drawData.tcFloats;
+        auto &normColBytes = workload.drawData.normColBytes;
         auto &minMatrix = drawCall.minWorldMatrix;
         auto &maxMatrix = drawCall.maxWorldMatrix;
         uint32_t globalIndices[3];
@@ -1135,6 +1246,38 @@ namespace RT64 {
             const hlslpp::float3 V = posScreen[globalIndices[2]] - posScreen[globalIndices[0]];
             const hlslpp::float3 N = hlslpp::cross(V, U);
             visibleTri = (N.z >= 0.0f);
+        }
+        static int tri_log = 0;
+        if (tri_log < 4) {
+            const hlslpp::float3 &p0 = posScreen[globalIndices[0]];
+            const hlslpp::float3 &p1 = posScreen[globalIndices[1]];
+            const hlslpp::float3 &p2 = posScreen[globalIndices[2]];
+            const float minx = std::min(float(p0.x), std::min(float(p1.x), float(p2.x)));
+            const float maxx = std::max(float(p0.x), std::max(float(p1.x), float(p2.x)));
+            const float miny = std::min(float(p0.y), std::min(float(p1.y), float(p2.y)));
+            const float maxy = std::max(float(p0.y), std::max(float(p1.y), float(p2.y)));
+            if ((maxx - minx) > 80.0f && (maxy - miny) > 80.0f && maxx > 0.0f && minx < 320.0f) {
+                tri_log++;
+                const FixedRect &scissor = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];
+                const auto &cc = state->rdp->colorCombinerStack[state->rdp->colorCombinerStackSize - 1];
+                const auto &prim = state->rdp->primColorStack[state->rdp->primColorStackSize - 1];
+                const auto &env = state->rdp->envColorStack[state->rdp->envColorStackSize - 1];
+                const uint32_t gi = globalIndices[0];
+                std::fprintf(stderr, "tri vis %d z %.5f %.5f %.5f box %.0f,%.0f %.0fx%.0f scissor %d %d %d %d geom %08X\n",
+                    visibleTri ? 1 : 0, float(p0.z), float(p1.z), float(p2.z),
+                    minx, miny, maxx - minx, maxy - miny,
+                    scissor.ulx, scissor.uly, scissor.lrx, scissor.lry, geometryMode);
+                std::fprintf(stderr, "  om %08X %08X cc %08X %08X prim %.2f %.2f %.2f %.2f tex %u tile %u\n",
+                    state->rdp->otherMode.L, state->rdp->otherMode.H, cc.L, cc.H,
+                    float(prim[0]), float(prim[1]), float(prim[2]), float(prim[3]),
+                    textureState.on, textureState.tile);
+                std::fprintf(stderr, "  cols %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X tc %.1f %.1f\n",
+                    normColBytes[globalIndices[0] * 4], normColBytes[globalIndices[0] * 4 + 1], normColBytes[globalIndices[0] * 4 + 2], normColBytes[globalIndices[0] * 4 + 3],
+                    normColBytes[globalIndices[1] * 4], normColBytes[globalIndices[1] * 4 + 1], normColBytes[globalIndices[1] * 4 + 2], normColBytes[globalIndices[1] * 4 + 3],
+                    normColBytes[globalIndices[2] * 4], normColBytes[globalIndices[2] * 4 + 1], normColBytes[globalIndices[2] * 4 + 2], normColBytes[globalIndices[2] * 4 + 3],
+                    tcFloats[gi * 2], tcFloats[gi * 2 + 1]);
+                std::fflush(stderr);
+            }
         }
 
         const FixedRect &scissorRect = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];

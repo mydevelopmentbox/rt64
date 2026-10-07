@@ -939,6 +939,22 @@ namespace RT64 {
                     for (int32_t f = workload.fbPairCount - 1; f >= 0; f--) {
                         const FramebufferPair &fbPair = workload.fbPairs[f];
                         bool interpolationCandidate = fbPair.earlyPresentCandidate();
+                        {
+                            static int fb_log = 0;
+                            if (fb_log < 8 && fbPair.gameCallCount > 10) {
+                                fb_log++;
+                                std::fprintf(stderr, "fbpair %d col %08X siz %u fmt %u w %u rect %d,%d %d,%d early %d empty %d calls %u proj %u\n",
+                                    f, fbPair.colorImage.address, fbPair.colorImage.siz, fbPair.colorImage.fmt,
+                                    fbPair.colorImage.width,
+                                    fbPair.drawColorRect.left(false), fbPair.drawColorRect.top(false),
+                                    fbPair.drawColorRect.right(false), fbPair.drawColorRect.bottom(false),
+                                    interpolationCandidate ? 1 : 0,
+                                    fbPair.drawColorRect.isEmpty() ? 1 : 0,
+                                    fbPair.gameCallCount,
+                                    fbPair.projectionCount);
+                                std::fflush(stderr);
+                            }
+                        }
                         if (fbPair.drawColorRect.isEmpty()) {
                             continue;
                         }

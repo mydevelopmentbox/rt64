@@ -169,7 +169,21 @@ namespace RT64 {
         DisplayList *dl = dlStart;
         uint8_t opCode;
         GBIFunction func;
+        int command_guard = 0;
         while (dl != nullptr) {
+            if (++command_guard > 500000) {
+                std::fprintf(stderr, "DL command guard hit 500k!\n");
+                std::fflush(stderr);
+                break;
+            }
+            if (command_guard == 8193) {
+                static int guard_logs = 0;
+                if (guard_logs < 5) {
+                    guard_logs++;
+                    std::fprintf(stderr, "DL passed 8192 commands!\n");
+                    std::fflush(stderr);
+                }
+            }
             opCode = (dl->w0 >> 24);
 
             if ((extendedOpCode != 0) && (opCode == extendedOpCode)) {

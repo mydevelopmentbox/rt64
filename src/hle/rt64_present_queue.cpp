@@ -4,6 +4,8 @@
 
 #include "rt64_present_queue.h"
 
+#include <cstdio>
+
 #include "common/rt64_thread.h"
 #include "rhi/rt64_render_hooks.h"
 
@@ -144,6 +146,37 @@ namespace RT64 {
             Framebuffer *viFb = nullptr;
             if (!viewRDRAM) {
                 viFb = fbManager.find(present.screenVI.fbAddress());
+                // Some games present a sub-rectangle of a larger color image. If the exact VI origin
+                // is not tracked, look for a framebuffer that contains the VI range.
+                if (viFb == nullptr) {
+                    const uint32_t viAddr = present.screenVI.fbAddress();
+                    const uint32_t bpp = (present.screenVI.fbSiz() == 2) ? 2u : (present.screenVI.fbSiz() == 3) ? 4u : 1u;
+                    const uint32_t viEnd = viAddr + fbSize.x * fbSize.y * bpp;
+                    Framebuffer *containingFb = fbManager.findMostRecentContaining(viAddr, viEnd);
+                    if (containingFb != nullptr) {
+                        static int contain_log = 0;
+                        if (contain_log < 4) {
+                            contain_log++;
+                            std::fprintf(stderr, "present fallback %08X-%08X -> fb %08X-%08X w %u h %u\n",
+                                viAddr, viEnd, containingFb->addressStart, containingFb->addressEnd,
+                                containingFb->width, containingFb->height);
+                            std::fflush(stderr);
+                        }
+                        viFb = containingFb;
+                    }
+                }
+            }
+            {
+                static int present_logs = 0;
+                const uint32_t looked = present.screenVI.fbAddress();
+                if (looked > 0x10000u && present_logs < 4) {
+                    present_logs++;
+                    std::fprintf(stderr, "present fb %08X found %d colors %u vi %ux%u\n",
+                        looked, viFb != nullptr ? 1 : 0,
+                        static_cast<unsigned>(ext.sharedResources->colorImageAddressVector.size()),
+                        static_cast<unsigned>(fbSize.x), static_cast<unsigned>(fbSize.y));
+                    std::fflush(stderr);
+                }
             }
 
             Framebuffer *presentFb = viFb;
@@ -198,6 +231,16 @@ namespace RT64 {
 
                 RenderTargetKey colorTargetKey(presentFb->addressStart, presentFb->width, presentFb->siz, Framebuffer::Type::Color);
                 colorTarget = &targetManager.get(colorTargetKey, true);
+                {
+                    static int size_logs = 0;
+                    if (size_logs < 2) {
+                        size_logs++;
+                        std::fprintf(stderr, "present native %ux%u target %ux%u empty %d\n",
+                            presentFb->width, presentFb->height, colorTarget->width, colorTarget->height,
+                            colorTarget->isEmpty() ? 1 : 0);
+                        std::fflush(stderr);
+                    }
+                }
                 if (!colorTarget->isEmpty()) {
                     // If a depth framebuffer is about to be shown, convert it to color.
                     if (presentFb->isLastWriteDifferent(Framebuffer::Type::Color)) {
@@ -211,6 +254,12 @@ namespace RT64 {
                     }
                 }
                 else {
+                    static int empty_logs = 0;
+                    if (empty_logs < 3) {
+                        empty_logs++;
+                        std::fprintf(stderr, "present target empty fb %08X\n", presentFb->addressStart);
+                        std::fflush(stderr);
+                    }
                     colorTarget = nullptr;
                 }
 
@@ -345,8 +394,22 @@ namespace RT64 {
                 commandList->clearColor();
 
                 if (renderParams.texture != nullptr) {
+                    static int blit_logs = 0;
+                    if (blit_logs < 2) {
+                        blit_logs++;
+                        std::fprintf(stderr, "present blit %ux%u\n", renderParams.textureWidth, renderParams.textureHeight);
+                        std::fflush(stderr);
+                    }
                     commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(renderParams.texture, RenderTextureLayout::SHADER_READ));
                     viRenderer->render(renderParams);
+                }
+                else if (colorTarget != nullptr) {
+                    static int resolve_logs = 0;
+                    if (resolve_logs < 2) {
+                        resolve_logs++;
+                        std::fprintf(stderr, "present resolve null %ux%u\n", colorTarget->width, colorTarget->height);
+                        std::fflush(stderr);
+                    }
                 }
 
                 RenderHookDraw *drawHook = GetRenderHookDraw();

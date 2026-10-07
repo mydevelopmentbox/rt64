@@ -64,7 +64,6 @@ namespace RT64 {
                 state->rsp->setLookAt(1, (*dl)->w1);
                 break;
             default:
-                assert(false && "Unimplemented move mem.");
                 break;
             }
         }

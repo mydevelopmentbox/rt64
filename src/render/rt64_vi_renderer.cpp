@@ -4,6 +4,8 @@
 
 #include "rt64_vi_renderer.h"
 
+#include <cstdio>
+
 #include "shared/rt64_hlsl.h"
 #include "shared/rt64_video_interface.h"
 
@@ -70,11 +72,24 @@ namespace RT64 {
         RenderViewport viewport;
         RenderRect scissor;
         getViewportAndScissor(p.swapChain, *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, viewport, scissor);
+        {
+            static int view_logs = 0;
+            if (view_logs < 2) {
+                view_logs++;
+                std::fprintf(stderr, "vi view %.1f,%.1f %.1fx%.1f scissor %d,%d %d,%d swap %ux%u\n",
+                    viewport.x, viewport.y, viewport.width, viewport.height,
+                    scissor.left, scissor.top, scissor.right, scissor.bottom,
+                    p.swapChain->getWidth(), p.swapChain->getHeight());
+                std::fflush(stderr);
+            }
+        }
         p.commandList->setViewports(viewport);
         p.commandList->setScissors(scissor);
 
         interop::VideoInterfaceCB pushConstants;
-        pushConstants.videoResolution = computeHDSize(hlslpp::float2(p.vi->fbSize()), p.resolutionScale, p.downsamplingScale);
+        // The color target can be larger than the VI size when the color image is wider than the
+        // video mode (this game's logo is 640x380 while the VI is 320x240). Sample the whole target.
+        pushConstants.videoResolution = { float(p.textureWidth), float(p.textureHeight) };
         pushConstants.textureResolution = { float(p.textureWidth), float(p.textureHeight) };
         pushConstants.gamma = p.vi->gamma();
 
